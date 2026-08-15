@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 PY := 3.11
 
-.PHONY: help setup lint fmt test check clean data-check
+.PHONY: help setup lint fmt test check clean data-check phase1 phase1b
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -36,6 +36,12 @@ data-check:  ## Fail if any data file has been committed (CLAUDE.md hard rule)
 	else \
 		echo "OK: no data files tracked."; \
 	fi
+
+phase1:  ## Run the Phase 1 baseline-vs-NESO comparison (hits the network on a cold cache)
+	uv run python scripts/run_phase1.py
+
+phase1b:  ## Run the Phase 1b gas LDZ comparison + core-test power analysis
+	uv run python scripts/run_phase1b.py
 
 clean:  ## Remove caches and build artefacts
 	rm -rf .pytest_cache .ruff_cache .mypy_cache build dist *.egg-info htmlcov .coverage

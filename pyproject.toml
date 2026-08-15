@@ -112,6 +112,7 @@ module = [
     "cdsapi.*",
     "seaborn.*",
     "sklearn.*",
+    "scipy.*",
 ]
 ignore_missing_imports = true
 
