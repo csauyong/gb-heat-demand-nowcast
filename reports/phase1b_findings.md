@@ -8,6 +8,21 @@ been started.
 
 ---
 
+> **Correction, 2026-11-17 (decision log rows 39, 41, 42; Phase C0).** The
+> "3.8× less accurate on the coldest decile" headline below is **withdrawn**.
+> It compares MAEs in mscm/day, and mean offtake in the coldest CWV decile is
+> 4.74× that of the warmest. Recomputed on the same 978 gas days, the gradient
+> reverses on relative scales: MAPE **2.47%** coldest vs **3.05%** warmest
+> decile; MAE ÷ baseline-fitted demand 2.55% vs 3.36%. In relative terms the
+> incumbent is *more* accurate in the cold. What survives is a small signed
+> bias that moves with CWV: over-forecast in the colder deciles (GB sum,
+> +1.90 and +1.97 mscm/day in deciles 2 and 4, HAC 95% intervals excluding
+> zero) and under-forecast in deciles 7–10 (warmest −0.52 [−0.88, −0.16]),
+> never more than 2.5% of mean GB offtake. That is a candidate weak-efficiency
+> failure for Phase C1, not a heat-shaped forecast failure. The text below is
+> left as written on 2026-08-15. Tables: `reports/tables/c0_scale_check.csv`,
+> `c0_reconciliation.json`.
+
 ## The headline, stated plainly
 
 **On the primary target, the picture is materially different from Phase 1, and
