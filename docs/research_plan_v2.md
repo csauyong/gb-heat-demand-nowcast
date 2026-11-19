@@ -320,8 +320,18 @@ hedge-fund research.
    Done 2026-11-17, row 42. §0's hypothesis confirmed: the 3.8× figure is
    withdrawn; a small CWV-monotone signed bias survives and goes into C1.
 3. Literature search for GB gas forecast revision efficiency (30 minutes,
-   written up in the decision log).
+   written up in the decision log). **First pass done 2026-11-17:**
+   `docs/paper1_literature.md`, decision log row 50.
 4. Harvest the National Gas folder list for price, linepack and imbalance
    series; record ids and history start in `docs/data_inventory.md` §4.
-5. Resolve the publication-timestamp timezone.
-6. MDE for the C1 primary test. Then, and only then, estimate.
+   **Moot after the C1 kill** unless the owner opens a new hypothesis.
+   (Note: `heat_nowcast.data.gas.USER_AGENT` sends the owner's email address
+   to the portal as a contact. Owner approved keeping it, 2026-11-17.)
+5. Resolve the publication-timestamp timezone. **Moot after the C1 kill**, as
+   for 4.
+6. ~~MDE for the C1 primary test. Then, and only then, estimate.~~ Done
+   2026-11-17 (rows 43–47). MDE 0.254; primary β = −0.044 (p = 0.72).
+   **Kill criterion C1 fired**: revision-efficient, not unbiased (bias peaked
+   in 2022/23). See `reports/phase2_efficiency.md`. Next: C3 write-up, or an
+   owner decision to freeze a new post-hoc hypothesis (ΔCWV under-response /
+   cold over-forecast) for the confirmation samples only.
