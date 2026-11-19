@@ -239,6 +239,27 @@ stronger test of a domestic heat model than the electricity signal.
 > restatement is mean-absolute 0.068 mscm/day (0.76% of offtake), 83.8%
 > unrevised.
 
+> **Amendment 2026-11-17 (Paper 1, P0; decision log row 49).**
+>
+> - **Clock resolved:** portal timestamps are **UK local time**. The hourly NTS
+>   forecast skips hour 01 on spring clock changes. Convert with
+>   `heat_nowcast.timeutils.portal_local_to_utc`.
+> - **Gas day:** 05:00–05:00 **UK local time** (04:00 UTC under BST), not
+>   05:00 UTC all year. Use `timeutils.gas_day_start_utc`.
+> - **National series**, loaders in `heat_nowcast.data.nts_market`, all from
+>   gas day 2021-12-01:
+>   - NTS demand forecast, every publication (`PUBOB623`, 8 slots, D−1
+>     13:10 / 16:15 …);
+>   - hourly update (`PUBOB28`);
+>   - D−2…D−5 (`PUBOB36/39/42/45`);
+>   - NTS actual D+1 (`PUBOB637`, republished ~5× on D+1) and D+6
+>     (`PUBOB652`);
+>   - SAP day (`PUBOB603`) and SAP hourly within-day path (`PUBOB47`,
+>     published 08:30 D+1);
+>   - SMP buy/sell (`PUBOB604/605`).
+> - Price loaders refuse windows over 7 days until Paper 1's price hypotheses
+>   are frozen.
+
 - **Licence:** free to access; check the portal terms for redistribution.
 - **Series of interest:** NTS LDZ (Local Distribution Zone) offtakes — this is
   as close to a direct measurement of domestic + small commercial heat demand

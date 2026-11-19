@@ -43,7 +43,16 @@ HALF_HOUR: Final[pd.Timedelta] = pd.Timedelta(minutes=30)
 
 #: Gas day runs 05:00-05:00 UTC and is *not* the electricity day
 #: (`CLAUDE.md` §2.3, `docs/data_inventory.md` §4).
+#:
+#: **Correct in GMT only.** Established 2026-11-17 (decision log row 49): the
+#: GB gas day is 05:00-05:00 *UK local* time -- 05:00 UTC in winter, 04:00 UTC
+#: under BST (EU CAM definition; National Gas's hourly forecast for gas day D
+#: stops at 04:0x local in both seasons). Kept unchanged so that Phase 1b
+#: results stay reproducible; new code uses :func:`gas_day_start_utc`.
 GAS_DAY_START_UTC_HOUR: Final[int] = 5
+
+#: Hour of the UK-local clock at which a GB gas day starts, all year.
+GAS_DAY_START_LOCAL_HOUR: Final[int] = 5
 
 
 def london_midnight_utc(settlement_date: pd.Series | pd.DatetimeIndex) -> pd.Series:
@@ -138,3 +147,60 @@ def gas_day(timestamps: pd.Series) -> pd.Series:
         raise ValueError(msg)
     shifted = index.tz_convert(UTC) - pd.Timedelta(hours=GAS_DAY_START_UTC_HOUR)
     return pd.Series(shifted.tz_localize(None).normalize())
+
+
+def gas_day_start_utc(gas_day: pd.Series | pd.DatetimeIndex) -> pd.Series:
+    """Return the UTC instant at which each GB gas day begins.
+
+    The gas day starts at 05:00 UK local time (decision log row 49): 05:00 UTC
+    in winter, 04:00 UTC under BST. 05:00 local is never inside a clock
+    change (changes happen at 01:00 UTC), so localising it is unambiguous.
+
+    Parameters
+    ----------
+    gas_day :
+        Naive dates labelling gas days.
+
+    Returns
+    -------
+    pandas.Series
+        Timezone-aware UTC timestamps.
+    """
+    days = pd.to_datetime(pd.Series(gas_day).to_numpy()).normalize()
+    local = (days + pd.Timedelta(hours=GAS_DAY_START_LOCAL_HOUR)).tz_localize(LONDON)
+    return pd.Series(local.tz_convert(UTC))
+
+
+def portal_local_to_utc(timestamps: pd.Series) -> pd.Series:
+    """Convert National Gas portal timestamps (UK local wall clock) to UTC.
+
+    The portal's ``generatedTimeStamp`` and ``applicableAt`` are UK local time:
+    its hourly publications skip hour 01 on every spring clock change
+    (2022-2024 checked; decision log row 49).
+
+    Clock-change edge cases are resolved in the **conservative** direction for
+    point-in-time use -- the later of the candidate instants, so a value is
+    never treated as knowable earlier than it could have been:
+
+    * an ambiguous autumn wall time (01:xx twice) is read as GMT, the later one;
+    * a non-existent spring wall time (01:xx) is shifted forward.
+
+    Parameters
+    ----------
+    timestamps :
+        Naive portal timestamps.
+
+    Returns
+    -------
+    pandas.Series
+        Timezone-aware UTC timestamps, same index as the input.
+    """
+    index = pd.DatetimeIndex(timestamps)
+    if index.tz is not None:
+        msg = "portal_local_to_utc expects naive portal timestamps"
+        raise ValueError(msg)
+    ambiguous_as_gmt = np.zeros(len(index), dtype=bool)
+    local = index.tz_localize(
+        LONDON, ambiguous=ambiguous_as_gmt, nonexistent="shift_forward"
+    )
+    return pd.Series(local.tz_convert(UTC), index=timestamps.index)

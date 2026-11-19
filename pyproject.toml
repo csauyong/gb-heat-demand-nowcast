@@ -31,6 +31,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# LSEG Workspace desktop session for Paper 1 prices (needs an institutional licence)
+market = ["lseg-data>=2.1"]
 dev = [
     "ruff>=0.6",
     "mypy>=1.11",
