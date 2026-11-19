@@ -377,6 +377,79 @@ def _fetch_series(
     return frame[keep].rename(columns={"UnitOfMeasure": "unit"}), urls
 
 
+def fetch_publication_object(
+    object_id: str,
+    start: dt.date,
+    end: dt.date,
+    *,
+    all_publications: bool,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Fetch one non-LDZ publication object, chunked by calendar year.
+
+    The building block for national series (NTS demand, system prices); the
+    caller documents source, licence, vintage and lag in its own loader.
+
+    Parameters
+    ----------
+    object_id :
+        Portal publication-object id, e.g. ``"PUBOB623"``.
+    start, end :
+        Inclusive gas-day bounds.
+    all_publications :
+        ``True`` sends ``latestFlag=N`` (every publication, needed for any
+        point-in-time selection); ``False`` sends ``latestFlag=Y``.
+
+    Returns
+    -------
+    frame : pandas.DataFrame
+        ``gas_day``, ``value``, ``generated_at`` and ``applicable_at`` (both
+        naive, portal UK-local clock), ``unit``, ``item_name``. Empty if the
+        portal returned nothing.
+    urls : list of str
+        The requests made, for the cache sidecar.
+    """
+    records: list[dict[str, Any]] = []
+    urls: list[str] = []
+    for chunk_start, chunk_end in _year_chunks(start, end):
+        body = {
+            "latestFlag": "N" if all_publications else "Y",
+            "applicableFor": "Y",
+            "dateFrom": chunk_start.isoformat(),
+            "dateTo": chunk_end.isoformat(),
+            "dateType": "GASDAY",
+            "ids": object_id,
+        }
+        records.extend(_post(body))
+        urls.append(f"POST {FIND_GAS_DATA_URL} {json.dumps(body, sort_keys=True)}")
+
+    columns = ["gas_day", "value", "generated_at", "applicable_at", "unit", "item_name"]
+    if not records:
+        return pd.DataFrame(columns=columns), urls
+
+    raw = pd.DataFrame.from_records(records)
+    frame = pd.DataFrame(
+        {
+            "gas_day": pd.to_datetime(
+                raw["applicableFor"], format="%d/%m/%Y", errors="coerce"
+            ),
+            "value": pd.to_numeric(raw["value"], errors="coerce"),
+            "generated_at": pd.to_datetime(
+                raw["generatedTimeStamp"], format="%d/%m/%Y %H:%M:%S", errors="coerce"
+            ),
+            "applicable_at": pd.to_datetime(
+                raw["applicableAt"], format="%d/%m/%Y %H:%M:%S", errors="coerce"
+            ),
+            "unit": raw["UnitOfMeasure"],
+            "item_name": raw["itemName"],
+        }
+    )
+    bad = int(frame["gas_day"].isna().sum() + frame["generated_at"].isna().sum())
+    if bad:
+        msg = f"{bad} rows had unparseable timestamps for {object_id}"
+        raise ValueError(msg)
+    return frame[columns], urls
+
+
 def _assert_full_panel(frame: pd.DataFrame, series: str) -> None:
     """Fail if any LDZ is missing, rather than silently modelling 12 zones.
 
@@ -629,6 +702,95 @@ def load_ldz_demand_forecast(
     )
     _assert_full_panel(frame, "demand_forecast")
     return frame
+
+
+#: Cache dataset stems for the two repeatedly-published series. Must stay equal
+#: to the stems used in :func:`load_ldz_demand_forecast` and :func:`load_ldz_cwv`
+#: so all three loaders share one cache entry per window.
+_HISTORY_STEMS: Final[dict[str, str]] = {
+    "demand_forecast": "ng_ldz_demand_forecast_all_pubs",
+    "cwv_forecast_d_minus_1": "ng_ldz_cwv_forecast_d_minus_1",
+}
+
+
+def load_ldz_publication_history(
+    series: str,
+    *,
+    start: dt.date = GAS_HISTORY_START,
+    end: dt.date | None = None,
+    vintage: str = "2026-08-14",
+    refresh: bool = False,
+) -> pd.DataFrame:
+    """Load **every** publication of a repeatedly-revised LDZ series, ungated.
+
+    Phase C1 tests the efficiency of the forecast's revisions, so it needs the
+    whole vintage history rather than the single publication a gate selects.
+    The caller is responsible for point-in-time use: a row may enter a
+    prediction only if its ``generated_at`` precedes the prediction's issue
+    time (see :mod:`heat_nowcast.features.vintages`).
+
+    Source: https://data.nationalgas.com/find-gas-data
+        ``POST https://data.nationalgas.com/api/find-gas-data`` with
+        ``latestFlag=N``; publication objects ``Demand Forecast, LDZ (XX)``
+        (``PUBOB609``-``PUBOB621``) or ``Composite Weather Variable, Forecast,
+        LDZ(XX), D-1`` (``PUBOB3726``-``PUBOB3738``).
+    Licence: National Gas Transmission Data Portal terms; see
+        ``docs/data_inventory.md`` §4.
+    Vintage: downloaded {vintage}. Shares its cache entry with
+        :func:`load_ldz_demand_forecast` / :func:`load_ldz_cwv`.
+    Publication lag: each row is knowable from its own ``generated_at``, in
+        the portal's clock (timezone unresolved -- London or UTC; see the
+        module docstring). Demand forecast: ~8 publications per gas day, from
+        13:15 on D-1 to 00:15 on D+1. CWV forecast: ~4 publications on D-1.
+
+    Parameters
+    ----------
+    series :
+        ``"demand_forecast"`` or ``"cwv_forecast_d_minus_1"``.
+    start, end :
+        Inclusive gas-day bounds.
+    vintage :
+        Vintage label; also part of the cache key.
+    refresh :
+        Force a re-pull.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns ``gas_day``, ``ldz``, ``value``, ``generated_at``, ``unit``,
+        ``itemName``; one row per publication.
+    """
+    if series not in _HISTORY_STEMS:
+        msg = f"series must be one of {sorted(_HISTORY_STEMS)}, got {series!r}"
+        raise ValueError(msg)
+    end = end or (dt.datetime.now(tz=dt.UTC).date() - dt.timedelta(days=8))
+
+    def fetch() -> tuple[pd.DataFrame, list[str]]:
+        return _fetch_series(series, start, end, all_publications=True)
+
+    raw = cached_pull(
+        dataset=f"{_HISTORY_STEMS[series]}_{start.isoformat()}_{end.isoformat()}",
+        vintage=vintage,
+        licence=NATIONAL_GAS_LICENCE,
+        publication_lag=(
+            "Full publication history; each row knowable from its generated_at."
+        ),
+        fetch=fetch,
+        params={
+            "series": series,
+            "ids": PUBLICATION_OBJECTS[series],
+            "latestFlag": "N",
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        },
+        notes=(
+            "FULL PUBLICATION HISTORY. Gate on generated_at before any use in "
+            "a prediction."
+        ),
+        refresh=refresh,
+    )
+    _assert_full_panel(raw, series)
+    return raw.sort_values(["gas_day", "ldz", "generated_at"]).reset_index(drop=True)
 
 
 def load_ldz_cwv(
