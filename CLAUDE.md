@@ -121,8 +121,13 @@ in a backtest of a decision made at gate closure.
 Every feature has a timestamp at which it became knowable. That timestamp —
 not the timestamp it describes — determines which prediction it may enter.
 EPC stock data has a quarterly release lag; day-ahead forecasts appear at a
-known time of day; gas data has its own gas-day convention (05:00–05:00 UTC,
-which is *not* the electricity day). Getting the gas day wrong is a leak.
+known time of day; gas data has its own gas-day convention (05:00–05:00 **UK
+local time**: 05:00 UTC in winter, 04:00 UTC under BST; it is *not* the
+electricity day). Getting the gas day wrong is a leak. National Gas portal
+timestamps are UK local wall-clock time; convert them with
+`timeutils.portal_local_to_utc`. (Amended 2026-11-23: earlier text said
+05:00–05:00 UTC, which is wrong for half the year; see the
+gb-heat-demand-nowcast decision log, row 49.)
 
 ### 2.4 Corporate actions and survivorship (Project B)
 
@@ -312,8 +317,9 @@ def load_neso_day_ahead_forecast(
 - All timestamps are timezone-aware UTC internally. Convert to Europe/London
   only at the display boundary. BST transitions create 46- and 50-settlement-
   period days in GB electricity data; code must handle both.
-- Gas day (05:00–05:00 UTC) and electricity day are different. Never mix them
-  without an explicit conversion function.
+- Gas day (05:00–05:00 UK local, i.e. 04:00 UTC under BST) and electricity day
+  are different. Never mix them without an explicit conversion function
+  (`timeutils.gas_day`, `timeutils.gas_day_start_utc`).
 - `src/` is an installed package (`pip install -e .` via `make setup`).
   Notebooks import from it. **Analysis logic does not live in notebooks** —
   notebooks are for exploration and for rendering results, and any function

@@ -47,8 +47,9 @@ HALF_HOUR: Final[pd.Timedelta] = pd.Timedelta(minutes=30)
 #: **Correct in GMT only.** Established 2026-11-17 (decision log row 49): the
 #: GB gas day is 05:00-05:00 *UK local* time -- 05:00 UTC in winter, 04:00 UTC
 #: under BST (EU CAM definition; National Gas's hourly forecast for gas day D
-#: stops at 04:0x local in both seasons). Kept unchanged so that Phase 1b
-#: results stay reproducible; new code uses :func:`gas_day_start_utc`.
+#: stops at 04:0x local in both seasons). No code uses it any more; kept only
+#: so old notebooks fail loudly on review rather than silently. Use
+#: :func:`gas_day` / :func:`gas_day_start_utc`.
 GAS_DAY_START_UTC_HOUR: Final[int] = 5
 
 #: Hour of the UK-local clock at which a GB gas day starts, all year.
@@ -125,11 +126,12 @@ def to_london(timestamps: pd.Series) -> pd.Series:
 
 
 def gas_day(timestamps: pd.Series) -> pd.Series:
-    """Map UTC instants to their gas day (05:00-05:00 UTC).
+    """Map UTC instants to their GB gas day (05:00-05:00 UK local time).
 
-    Provided so that any future gas-side work has to call an explicit
-    conversion rather than reusing the electricity day by accident
-    (`CLAUDE.md` §2.3). Not used by the Phase 1 electricity baseline.
+    The gas day starts at 05:00 London wall-clock time: 05:00 UTC in winter,
+    04:00 UTC under BST (decision log row 49; `CLAUDE.md` §2.3 as amended
+    2026-11-23). Provided so gas-side code has to call an explicit conversion
+    rather than reusing the electricity day by accident.
 
     Parameters
     ----------
@@ -145,8 +147,9 @@ def gas_day(timestamps: pd.Series) -> pd.Series:
     if index.tz is None:
         msg = "gas_day requires timezone-aware UTC timestamps"
         raise ValueError(msg)
-    shifted = index.tz_convert(UTC) - pd.Timedelta(hours=GAS_DAY_START_UTC_HOUR)
-    return pd.Series(shifted.tz_localize(None).normalize())
+    local = index.tz_convert(LONDON).tz_localize(None)
+    shifted = local - pd.Timedelta(hours=GAS_DAY_START_LOCAL_HOUR)
+    return pd.Series(shifted.normalize())
 
 
 def gas_day_start_utc(gas_day: pd.Series | pd.DatetimeIndex) -> pd.Series:

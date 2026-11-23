@@ -128,6 +128,17 @@ def test_gas_day_boundary_is_05_00_utc():
     ]
 
 
+def test_gas_day_follows_uk_local_clock_in_summer():
+    # Under BST the gas day starts at 04:00 UTC (05:00 London).
+    stamps = pd.Series(
+        pd.to_datetime(
+            ["2024-07-15T03:59:00Z", "2024-07-15T04:00:00Z"],
+            utc=True,
+        )
+    )
+    assert list(gas_day(stamps).astype(str)) == ["2024-07-14", "2024-07-15"]
+
+
 def test_gas_day_requires_timezone_aware_input():
     with pytest.raises(ValueError, match="timezone-aware"):
         gas_day(pd.Series(pd.to_datetime(["2024-01-15T05:00:00"])))
