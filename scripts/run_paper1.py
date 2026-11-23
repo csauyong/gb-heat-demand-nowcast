@@ -6,6 +6,7 @@ Usage::
     python scripts/run_paper1.py baselines   # named baselines (§4)
     python scripts/run_paper1.py mde         # MDEs (§6), before any estimate
     python scripts/run_paper1.py estimate    # H1 and the secondary family
+    python scripts/run_paper1.py robustness  # pre-listed checks 6 and 7 for H1
 
 Each stage writes ``reports/tables/paper1_<stage>*``. The MDE stage must be run
 and logged in ``reports/decision_log.md`` before the estimate stage
@@ -70,6 +71,10 @@ def main(stage: str) -> None:
         )
         print(table.to_string(index=False))
         print(json.dumps(detail, indent=2, default=float))
+    elif stage == "robustness":
+        table = paper1.h1_robustness(panel)
+        table.to_csv(TABLES_DIR / "paper1_h1_robustness.csv", index=False)
+        print(table.to_string(index=False))
     else:
         msg = f"unknown stage {stage!r}"
         raise SystemExit(msg)

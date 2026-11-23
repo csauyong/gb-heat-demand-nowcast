@@ -193,7 +193,7 @@ def build_panel(end: dt.date = DEV_END) -> pd.DataFrame:
     eex = load_nbp_day_ahead(DEVP_START, end - dt.timedelta(days=1))
     eex = eex.assign(gas_day=eex["trade_date"] + pd.Timedelta(days=1))
     panel = panel.merge(
-        eex[["gas_day", "trade_date", "price_p_kwh"]].rename(
+        eex[["gas_day", "trade_date", "delivery_date", "price_p_kwh"]].rename(
             columns={"price_p_kwh": "p_da"}
         ),
         on="gas_day",
@@ -206,8 +206,12 @@ def build_panel(end: dt.date = DEV_END) -> pd.DataFrame:
         how="left",
     )
     in_devp = panel["gas_day"] >= pd.Timestamp(DEVP_START)
+    # The row must actually deliver on D = t + 1 (FUT_BASIS; row 59).
+    delivers_next_day = panel["delivery_date"] == panel["gas_day"]
     panel["pr"] = (
-        product_rule(panel["gas_day"], eex["trade_date"], holidays_ew) & in_devp
+        product_rule(panel["gas_day"], eex["trade_date"], holidays_ew)
+        & in_devp
+        & delivers_next_day
     )
     panel["pr_both"] = panel["pr"] & panel["pr"].shift(1, fill_value=False)
     panel["y"] = (panel["sap"] - panel["p_da"]).where(panel["pr"])
@@ -248,6 +252,12 @@ def audit(panel: pd.DataFrame) -> dict[str, float]:
         "devp_gas_days": float(len(devp)),
         "devp_trade_mon_thu": float((trade.dt.dayofweek <= 3).sum()),
         "devp_with_eex_row": float(devp["p_da"].notna().sum()),
+        "eex_rows_not_delivering_next_day": float(
+            (
+                devp["delivery_date"].notna()
+                & (devp["delivery_date"] != devp["gas_day"])
+            ).sum()
+        ),
         "devp_with_sap": float(devp["sap"].notna().sum()),
         "product_rule_days": float(devp["pr"].sum()),
         "product_rule_both_days": float(devp["pr_both"].sum()),
@@ -582,3 +592,33 @@ def run_estimates(panel: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]
     table["holm_family_decision"] = table["test"].map(holm_decisions)
     detail: dict[str, object] = {"h2": h2, "h3": h3, "h1_r2": fit.r_squared}
     return table, detail
+
+
+# --------------------------------------------------------------------------
+# 6. Leak check and pre-listed robustness for H1 (never headline)
+# --------------------------------------------------------------------------
+
+
+def h1_robustness(panel: pd.DataFrame) -> pd.DataFrame:
+    """Pre-registered robustness checks 6 (winsorised) and 7 (HAC lags 3, 14)."""
+    h1 = panel.loc[panel["pr"]].dropna(subset=["y", "r_post", "dcwv_post"])
+    design = pd.concat([_h1_controls(h1), h1[["r_post"]]], axis=1)
+    rows = []
+    low, high = h1["y"].quantile([0.01, 0.99])
+    variants = {
+        "R6 outcome winsorised 1/99 (DEV-P)": (h1["y"].clip(low, high), 7),
+        "R7 HAC lags 3": (h1["y"], 3),
+        "R7 HAC lags 14": (h1["y"], 14),
+    }
+    for label, (outcome, lags) in variants.items():
+        fit = hac_ols(outcome, design, lags=lags)
+        rows.append(
+            {
+                "check": label,
+                "beta_post": fit.params["r_post"],
+                "se": fit.se["r_post"],
+                "p_value": fit.p_values["r_post"],
+                "n": fit.n,
+            }
+        )
+    return pd.DataFrame(rows)

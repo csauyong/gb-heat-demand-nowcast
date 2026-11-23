@@ -46,3 +46,14 @@ def test_access_failure_is_reported_not_raised(
     assert report.rows == 0
     assert report.error is not None
     assert "permission" in report.error
+
+
+def test_parse_fut_basis() -> None:
+    from heat_nowcast.data.lseg_prices import parse_fut_basis
+
+    parsed = parse_fut_basis(pd.Series(["20122024", "1012025", 6012025]))
+    assert parsed.dt.strftime("%Y-%m-%d").tolist() == [
+        "2024-12-20",
+        "2025-01-01",
+        "2025-01-06",
+    ]

@@ -159,18 +159,26 @@ def _get_history(ric: str, start: dt.date, end: dt.date) -> pd.DataFrame:
 #: The pre-registered day-ahead series (D6) and its price field.
 NBP_DAY_AHEAD_RIC: Final[str] = "PNX-NBPEOD-DA"
 NBP_DAY_AHEAD_FIELD: Final[str] = "TRDPRC_1"
+#: Delivery date of each EOD row, as ``DMMYYYY``/``DDMMYYYY`` (no zero pad).
+NBP_DELIVERY_FIELD: Final[str] = "FUT_BASIS"
 #: 1 therm = 29.3071 kWh (pre-registration §2).
 KWH_PER_THERM: Final[float] = 29.3071
+
+
+def parse_fut_basis(values: pd.Series) -> pd.Series:
+    """Parse LSEG ``FUT_BASIS`` delivery dates, e.g. ``1012025`` -> 2025-01-01."""
+    text = values.astype("string").str.replace(r"\.0$", "", regex=True).str.zfill(8)
+    return pd.to_datetime(text, format="%d%m%Y", errors="coerce")
 
 
 def load_nbp_day_ahead(
     start: dt.date,
     end: dt.date,
     *,
-    vintage: str = "2026-11-23",
+    vintage: str = "2026-11-23b",
     refresh: bool = False,
 ) -> pd.DataFrame:
-    """Load the EEX NBP day-ahead EOD index by trade date.
+    """Load the EEX NBP day-ahead EOD index by trade date, with delivery date.
 
     Source: LSEG Workspace, ``lseg.data.get_history("PNX-NBPEOD-DA")``, field
         ``TRDPRC_1``; index published by EEX (Powernext), "NBP Day Ahead
@@ -182,8 +190,11 @@ def load_nbp_day_ahead(
         show any revision via the sidecar's ``content_sha256``.
     Publication lag: the index for trade date t is fixed by trades and order
         book in **17:15-17:30 CE(S)T = 16:15-16:30 UK on t** and published
-        shortly after. It prices delivery on t + 1 (pre-registration §1
-        product rule). It is knowable from 16:30 UK on t, never earlier.
+        shortly after. It is knowable from 16:30 UK on t, never earlier.
+        Rows are **trade-dated**; ``FUT_BASIS`` gives the delivery day (t + 1
+        Monday-Thursday, the next Monday on Fridays; checked 2026-11-23,
+        decision log row 59). Vintage ``2026-11-23`` lacked the delivery date
+        and is superseded by ``2026-11-23b``.
 
     Embargoed: raises :class:`heat_nowcast.data.nts_market.PriceEmbargoError`
     for a long window until Paper 1's freeze row is set.
@@ -191,7 +202,8 @@ def load_nbp_day_ahead(
     Returns
     -------
     pandas.DataFrame
-        ``trade_date`` (naive), ``price_p_therm``, ``price_p_kwh``.
+        ``trade_date``, ``delivery_date`` (naive), ``price_p_therm``,
+        ``price_p_kwh``.
     """
     check_price_embargo(start, end)
 
@@ -205,6 +217,9 @@ def load_nbp_day_ahead(
                 "trade_date": pd.DatetimeIndex(history.index)
                 .tz_localize(None)
                 .normalize(),
+                "delivery_date": parse_fut_basis(
+                    history[NBP_DELIVERY_FIELD]
+                ).to_numpy(),
                 "price_p_therm": pd.to_numeric(
                     history[NBP_DAY_AHEAD_FIELD], errors="coerce"
                 ).to_numpy(),
@@ -229,6 +244,7 @@ def load_nbp_day_ahead(
     )
     out = raw.dropna(subset=["price_p_therm"]).copy()
     out["trade_date"] = pd.to_datetime(out["trade_date"])
+    out["delivery_date"] = pd.to_datetime(out["delivery_date"])
     out["price_p_kwh"] = out["price_p_therm"] / KWH_PER_THERM
     return out.sort_values("trade_date").reset_index(drop=True)
 
