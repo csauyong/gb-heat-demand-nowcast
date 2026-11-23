@@ -79,8 +79,8 @@ SYSTEM_PRICE_OBJECTS: Final[dict[str, str]] = {
 #: schema and timestamps only.
 PRICE_PROBE_MAX_DAYS: Final[int] = 7
 
-#: Decision-log row that froze Paper 1's price hypotheses. ``None`` until then.
-PRICE_PREREGISTRATION_ROW: Final[int | None] = None
+#: Decision-log row that froze Paper 1's price hypotheses (OSF https://osf.io/zdytk/).
+PRICE_PREREGISTRATION_ROW: Final[int | None] = 55
 
 
 class PriceEmbargoError(RuntimeError):
