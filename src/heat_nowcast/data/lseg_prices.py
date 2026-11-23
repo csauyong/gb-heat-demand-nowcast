@@ -8,7 +8,8 @@ fetches the series, keeps only dates and non-null counts, and discards the
 values before returning. Nothing is cached and no value is ever returned,
 printed or written (decision log row 52).
 
-The full loader for the chosen series is added at the freeze, behind
+The full loader for the chosen series, :func:`load_nbp_day_ahead`, was added
+after the freeze (decision log row 55) and sits behind
 :func:`heat_nowcast.data.nts_market.check_price_embargo`.
 
 Access
@@ -34,6 +35,9 @@ from typing import Any, Final
 
 import pandas as pd
 from dotenv import load_dotenv
+
+from heat_nowcast.data.cache import cached_pull
+from heat_nowcast.data.nts_market import check_price_embargo
 
 #: Environment variable holding the Workspace application key.
 APP_KEY_ENV: Final[str] = "LSEG_APP_KEY"
@@ -150,6 +154,83 @@ def _get_history(ric: str, start: dt.date, end: dt.date) -> pd.DataFrame:
     finally:
         ld.close_session()
     return pd.DataFrame(history)
+
+
+#: The pre-registered day-ahead series (D6) and its price field.
+NBP_DAY_AHEAD_RIC: Final[str] = "PNX-NBPEOD-DA"
+NBP_DAY_AHEAD_FIELD: Final[str] = "TRDPRC_1"
+#: 1 therm = 29.3071 kWh (pre-registration §2).
+KWH_PER_THERM: Final[float] = 29.3071
+
+
+def load_nbp_day_ahead(
+    start: dt.date,
+    end: dt.date,
+    *,
+    vintage: str = "2026-11-23",
+    refresh: bool = False,
+) -> pd.DataFrame:
+    """Load the EEX NBP day-ahead EOD index by trade date.
+
+    Source: LSEG Workspace, ``lseg.data.get_history("PNX-NBPEOD-DA")``, field
+        ``TRDPRC_1``; index published by EEX (Powernext), "NBP Day Ahead
+        European Gas Spot Index (EOD)".
+    Licence: the owner's institutional LSEG licence; derived results only,
+        raw values are not redistributed (``data/`` is gitignored).
+    Vintage: pulled {vintage}. EOD indices are not restated in normal
+        operation; a re-pull with ``refresh`` and a new vintage label would
+        show any revision via the sidecar's ``content_sha256``.
+    Publication lag: the index for trade date t is fixed by trades and order
+        book in **17:15-17:30 CE(S)T = 16:15-16:30 UK on t** and published
+        shortly after. It prices delivery on t + 1 (pre-registration §1
+        product rule). It is knowable from 16:30 UK on t, never earlier.
+
+    Embargoed: raises :class:`heat_nowcast.data.nts_market.PriceEmbargoError`
+    for a long window until Paper 1's freeze row is set.
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``trade_date`` (naive), ``price_p_therm``, ``price_p_kwh``.
+    """
+    check_price_embargo(start, end)
+
+    def fetch() -> tuple[pd.DataFrame, list[str]]:
+        history = _get_history(NBP_DAY_AHEAD_RIC, start, end)
+        if NBP_DAY_AHEAD_FIELD not in history.columns:
+            msg = f"{NBP_DAY_AHEAD_FIELD} missing; got {list(history.columns)}"
+            raise RuntimeError(msg)
+        frame = pd.DataFrame(
+            {
+                "trade_date": pd.DatetimeIndex(history.index)
+                .tz_localize(None)
+                .normalize(),
+                "price_p_therm": pd.to_numeric(
+                    history[NBP_DAY_AHEAD_FIELD], errors="coerce"
+                ).to_numpy(),
+            }
+        )
+        return frame, [f"lseg:{NBP_DAY_AHEAD_RIC}/{NBP_DAY_AHEAD_FIELD}"]
+
+    raw = cached_pull(
+        dataset=f"lseg_{NBP_DAY_AHEAD_RIC}_{start.isoformat()}_{end.isoformat()}",
+        vintage=vintage,
+        licence="LSEG institutional licence; not redistributed",
+        publication_lag="Trade date t value knowable from 16:30 UK on t.",
+        fetch=fetch,
+        params={
+            "ric": NBP_DAY_AHEAD_RIC,
+            "field": NBP_DAY_AHEAD_FIELD,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        },
+        notes="EEX NBP DA EOD, p/therm, by trade date.",
+        refresh=refresh,
+    )
+    out = raw.dropna(subset=["price_p_therm"]).copy()
+    out["trade_date"] = pd.to_datetime(out["trade_date"])
+    out["price_p_kwh"] = out["price_p_therm"] / KWH_PER_THERM
+    return out.sort_values("trade_date").reset_index(drop=True)
 
 
 def probe_history_coverage(
