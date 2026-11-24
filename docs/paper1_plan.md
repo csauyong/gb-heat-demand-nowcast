@@ -13,7 +13,7 @@ error being predictable.
 |---|---|
 | NTS forecast, every publication | **Done.** On disk, 2021-12-01 → 2026-11-09, no missing days. The incentivised D−1 forecast is the **13:10** portal slot (published "at 13:00"). |
 | NTS actuals D+1, D+6 | **Done.** D+1 is republished ~5× on D+1, so the first-knowable value must be gated. |
-| SAP / SMP | **Loaders done and tested; one probe week only.** Embargo lifted at the freeze (row 55, OSF https://osf.io/zdytk/). SAP and EEX DA pulled for DEV-P; DEV estimates in decision log row 59. H4 held (row 56). |
+| SAP / SMP | **Loaders done and tested; one probe week only.** Embargo lifted at the freeze (row 55, OSF https://osf.io/zdytk/). SAP and EEX DA pulled for DEV-P; DEV estimates in decision log row 59. H4 (point-in-time TMS baseline, demand lagged to D−2) in rows 60–62: null; the secondary family rejects nothing. |
 | Hourly within-day SAP path | **New finding:** `PUBOB47`. It allows an intraday version of H1 around the 10:15 / 13:10 / 16:15 publications. Caveat: it is a *cumulative* within-day average without volumes, so hourly marginal prices can't be recovered exactly. Decide day-level vs hourly H1 **at the freeze**, not after. |
 | Timestamp timezone | **Resolved: UK local.** §4.1 is no longer a risk. |
 | Gas-day definition | **05:00 UK local**, not 05:00 UTC. `CLAUDE.md` §2.3 needs an owner amendment; Phase 1b is affected by 1 h on BST days (disclosed, not re-run). |
