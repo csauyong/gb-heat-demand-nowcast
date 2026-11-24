@@ -342,3 +342,16 @@ def load_neso_day_ahead_forecast(
 - Never propose a random or k-fold split on this data.
 - Never produce a P&L number without a cost model.
 - When a result looks good, the first response is to look for the leak.
+
+---
+
+## 9. Tracking (added 2026-11-24)
+
+Three projects here are now aimed at publication: Paper 1 and Paper 2 (plans in
+`gb-heat-demand-nowcast/docs/`) and `gb-retail-gas-volume-risk/`. The event study
+is closed as a negative result. Order of work, next actions and deadlines for these
+and for the side conference papers live in one file:
+`~/Codebase/side conferences/ROADMAP.md` (quant section). Notion: Research Hub >
+"Side conference papers sprint 2026" and the My Research Papers database. Update
+ROADMAP.md at the end of each working session. The rules in this file still govern
+the work in this folder.
