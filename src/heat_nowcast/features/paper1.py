@@ -264,3 +264,27 @@ def latest_known_actual(
         public = (published < frame[issue_column]) & candidate.notna()
         result = result.where(~(public & result.isna()), candidate)
     return pd.Series(result.to_numpy(), index=daily.index)
+
+
+def classify_row_dating(row_dates: pd.Series, prices: pd.Series) -> str:
+    """Decide whether a daily power price is dated by delivery or auction day.
+
+    Decision log row 60, item 3, fixed before any value was seen: compare the
+    mean price by weekday of the row date. Weekend delivery is cheap, so
+    Saturday and Sunday as the two lowest weekdays means **delivery-dated**;
+    Friday and Saturday means **auction-dated** (the auction runs the day
+    before delivery). Anything else is ``"unclear"`` and the caller stops.
+
+    Returns
+    -------
+    str
+        ``"delivery"``, ``"auction"`` or ``"unclear"``.
+    """
+    weekday = pd.to_datetime(row_dates).dt.dayofweek
+    means = pd.Series(prices.to_numpy(), index=weekday.to_numpy()).groupby(level=0)
+    lowest = set(means.mean().nsmallest(2).index.tolist())
+    if lowest == {5, 6}:
+        return "delivery"
+    if lowest == {4, 5}:
+        return "auction"
+    return "unclear"

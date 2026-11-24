@@ -251,3 +251,85 @@ def test_nts_outturn_rule() -> None:
     out = nts_outturn(pubs, earliest=D1_EARLIEST).set_index("gas_day")["value"]
     assert out[day] == 259.2
     assert np.isnan(out[day + pd.Timedelta(days=1)])
+
+
+def test_classify_row_dating() -> None:
+    from heat_nowcast.features.paper1 import classify_row_dating
+
+    days = pd.Series(pd.date_range("2024-01-01", periods=70, freq="D"))
+    weekend = days.dt.dayofweek >= 5
+    delivery_priced = pd.Series(np.where(weekend, 50.0, 80.0))
+    assert classify_row_dating(days, delivery_priced) == "delivery"
+    # Same prices stamped one day earlier (auction day).
+    assert classify_row_dating(days - pd.Timedelta(days=1), delivery_priced) == (
+        "auction"
+    )
+    midweek_low = pd.Series(np.where(days.dt.dayofweek.isin([1, 2]), 50.0, 80.0))
+    assert classify_row_dating(days, midweek_low) == "unclear"
+
+
+def _tms_panel(n: int = 900) -> pd.DataFrame:
+    days = pd.date_range("2023-03-01", periods=n, freq="D")
+    rng = np.random.default_rng(7)
+    demand = 250 + 60 * np.cos(2 * np.pi * np.arange(n) / 365) + rng.normal(0, 5, n)
+    return pd.DataFrame(
+        {
+            "gas_day": days,
+            "an_d1": demand,
+            "an_d1_published": days + pd.Timedelta(days=1, hours=12, minutes=20),
+            "an_d6": demand,
+            "an_d6_published": days + pd.Timedelta(days=6, hours=12),
+            "fn_1310": demand + 3,
+            "fn_1615": demand + 2,
+            "p_da": rng.uniform(2.5, 3.5, n),
+            "pe_peak": rng.uniform(60, 120, n),
+            "pr_both": days.dayofweek.isin([2, 3, 4]),
+        }
+    )
+
+
+def test_tms_demand_lag_is_point_in_time() -> None:
+    from heat_nowcast.pipelines.paper1 import tms_frame
+
+    panel = _tms_panel(40)
+    frame = tms_frame(panel)
+    # D-2's actual publishes at D-1 12:20 < 16:30: admitted.
+    assert float(frame["lq2"].iloc[10]) == pytest.approx(
+        np.log(float(panel["an_d1"].iloc[8]))
+    )
+    late = panel.copy()
+    issue = pd.Timestamp(late["gas_day"].iloc[10]) - pd.Timedelta(hours=7, minutes=30)
+    late.loc[8, "an_d1_published"] = issue  # exactly at the issue: not yet known
+    assert np.isnan(float(tms_frame(late)["lq2"].iloc[10]))
+    nonpositive = panel.copy()
+    nonpositive.loc[10, "pe_peak"] = -1.0
+    out = tms_frame(nonpositive)
+    assert np.isnan(float(out["dln_s"].iloc[10]))
+    assert np.isnan(float(out["ln_s_lag"].iloc[11]))
+
+
+def test_tms_walk_forward_never_trains_on_unpublished_actuals() -> None:
+    from heat_nowcast.pipelines.paper1 import tms_columns, tms_frame, walk_forward_tms
+
+    panel = _tms_panel()
+    # April 2024's first sample day is Wed 3 April, issued 2 April 16:30. D+6
+    # 12:00 publication admits days up to 27 March; poison everything later.
+    poison = panel["gas_day"] >= pd.Timestamp("2024-03-28")
+    frame = tms_frame(panel)
+    frame.loc[poison.to_numpy(), "y_tms"] = 1e6
+    forecast = walk_forward_tms(frame, with_prices=True)
+    april = frame["gas_day"].between("2024-04-01", "2024-04-30")
+    assert forecast[april].notna().any()
+    assert forecast[april].abs().max() < 1000
+    assert "dln_p" not in tms_columns(frame, with_prices=False)
+    assert "dln_p" in tms_columns(frame, with_prices=True)
+
+
+def test_diebold_mariano_sign() -> None:
+    from heat_nowcast.pipelines.paper1 import diebold_mariano
+
+    rng = np.random.default_rng(9)
+    good = pd.Series(rng.normal(0, 1, 500))
+    bad = pd.Series(rng.normal(0, 3, 500))
+    result = diebold_mariano(good, bad)
+    assert result["mean_loss_diff"] < 0 and result["p_value"] < 0.01

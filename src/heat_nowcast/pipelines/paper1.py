@@ -2,7 +2,8 @@
 
 Pre-registration: ``docs/paper1_preregistration.md`` (frozen at commit
 ``8770eab``, OSF https://osf.io/zdytk/, decision log row 55). Implementation
-choices and deviations: decision log row 56. H4 is held (row 56, item 15).
+choices and deviations: decision log row 56. H4 and its point-in-time
+Thomas-Massol-Sevi baseline: decision log row 60.
 
 The stages are separate functions so the runner can write and log the MDEs
 **before** any hypothesis coefficient is computed (pre-registration §6):
@@ -12,11 +13,13 @@ The stages are separate functions so the runner can write and log the MDEs
 3. :func:`run_baselines` -- the named baselines (§4).
 4. :func:`run_mdes` -- MDEs (§6).
 5. :func:`run_estimates` -- H1, H1-orth, H1-tight, H2, H3, H5; Holm.
+6. :func:`run_h4_baseline`, :func:`run_h4_mde`, :func:`run_h4` -- H4 (row 60).
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass
 from typing import Final
 
@@ -27,10 +30,12 @@ import statsmodels.api as sm
 from heat_nowcast.analysis.paper1_tests import (
     ALPHA,
     BLOCK_DAYS,
+    HAC_LAGS,
     SEED,
     MdeResult,
     ekt_gmm,
     hac_ols,
+    holm,
     holm_with_pending,
     median_mz,
     simulate_mde_median_mz,
@@ -43,7 +48,10 @@ from heat_nowcast.data.gas import (
     load_ldz_demand_actual,
     load_ldz_publication_history,
 )
-from heat_nowcast.data.lseg_prices import load_nbp_day_ahead
+from heat_nowcast.data.lseg_prices import (
+    load_gb_power_day_ahead_peak,
+    load_nbp_day_ahead,
+)
 from heat_nowcast.data.nts_market import (
     first_publication,
     load_nts_publication_history,
@@ -53,6 +61,7 @@ from heat_nowcast.features.paper1 import (
     CUTOFF_D_0500,
     CUTOFF_DM1_1310,
     CUTOFF_DM1_1615,
+    classify_row_dating,
     cwv_weights_by_gas_year,
     gas_year,
     gated_ldz_values,
@@ -122,8 +131,12 @@ def build_panel(end: dt.date = DEV_END) -> pd.DataFrame:
     nts_end = max(end, dt.date(2026, 11, 9))  # cached window; trimmed below
     nts = label_nts_slots(load_nts_publication_history("demand_forecast", end=nts_end))
     nts_dropped = int(nts.attrs["rows_dropped"])
-    nts = nts[["gas_day", "f_dm1_1310", "issued_dm1_1310"]].rename(
-        columns={"f_dm1_1310": "fn_1310", "issued_dm1_1310": "issued_n_1310"}
+    nts = nts[["gas_day", "f_dm1_1310", "issued_dm1_1310", "f_dm1_1615"]].rename(
+        columns={
+            "f_dm1_1310": "fn_1310",
+            "issued_dm1_1310": "issued_n_1310",
+            "f_dm1_1615": "fn_1615",
+        }
     )
     panel = panel.merge(nts, on="gas_day", how="left")
     for series, name in (
@@ -216,6 +229,24 @@ def build_panel(end: dt.date = DEV_END) -> pd.DataFrame:
     panel["pr_both"] = panel["pr"] & panel["pr"].shift(1, fill_value=False)
     panel["y"] = (panel["sap"] - panel["p_da"]).where(panel["pr"])
     panel["dp_da"] = (panel["p_da"] - panel["p_da"].shift(1)).where(panel["pr_both"])
+
+    # GB day-ahead power peakload for the H4 baseline (row 60). Rows are
+    # auction-dated by row 60's weekday rule, so delivery = row date + 1.
+    power = load_gb_power_day_ahead_peak(
+        DEVP_START - dt.timedelta(days=5), end - dt.timedelta(days=1)
+    )
+    dating = classify_row_dating(power["row_date"], power["price_gbp_mwh"])
+    if dating != "auction":
+        msg = f"EPEX row dating is {dating!r}, not 'auction' (row 60): stop"
+        raise RuntimeError(msg)
+    power = power.assign(gas_day=power["row_date"] + pd.Timedelta(days=1))
+    panel = panel.merge(
+        power[["gas_day", "price_gbp_mwh"]].rename(
+            columns={"price_gbp_mwh": "pe_peak"}
+        ),
+        on="gas_day",
+        how="left",
+    )
     panel.attrs["cwv_weights"] = weights.to_dict("records")
     panel.attrs["nts_rows_dropped"] = nts_dropped
     return panel
@@ -622,3 +653,227 @@ def h1_robustness(panel: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+# --------------------------------------------------------------------------
+# 7. H4 and its point-in-time Thomas-Massol-Sevi baseline (row 60)
+# --------------------------------------------------------------------------
+
+#: The day-ahead window closes at D-1 16:30 (portal clock): the TMS issue time.
+TMS_ISSUE: Final[pd.Timedelta] = pd.Timedelta(hours=-7, minutes=-30)
+#: First scored month after the 12-month burn-in from DEV-P's start.
+TMS_SCORE_START: Final[pd.Timestamp] = pd.Timestamp("2024-04-01")
+TMS_PRICE_TERMS: Final[tuple[str, ...]] = ("ln_s_lag", "ln_p_lag", "dln_s", "dln_p")
+H4_CONTROLS: Final[list[str]] = ["r_1315_1615", "dcwv_1215_1515"]
+
+
+def tms_frame(panel: pd.DataFrame) -> pd.DataFrame:
+    """Variables of B-TMS-PIT (row 60), aligned to the contiguous calendar panel.
+
+    Demand regressors are the NTS D+1 actual of D-2 and D-3, admitted only if
+    first published strictly before D-1 16:30; otherwise NaN. Prices are in
+    GBP/MWh; a non-positive power price leaves the log spark ratio missing.
+    """
+    frame = panel.reset_index(drop=True)
+    issue = frame["gas_day"] + TMS_ISSUE
+
+    def known_log_q(lag: int) -> pd.Series:
+        demand = frame["an_d1"].shift(lag)
+        published = frame["an_d1_published"].shift(lag)
+        out: pd.Series = np.log(demand.where(published < issue))
+        return out
+
+    lq2, lq3 = known_log_q(2), known_log_q(3)
+    gas = frame["p_da"] * 10.0  # p/kWh -> GBP/MWh
+    power = frame["pe_peak"].where(frame["pe_peak"] > 0)
+    ln_p = pd.Series(np.log(gas), index=frame.index)
+    ln_s = pd.Series(np.log(power / gas), index=frame.index)
+    months = month_dummies(frame["gas_day"])
+    out = pd.DataFrame(
+        {
+            "gas_day": frame["gas_day"],
+            "an_d6": frame["an_d6"],
+            "an_d6_published": frame["an_d6_published"],
+            "issued_tms": issue,
+            "fn_1310": frame["fn_1310"],
+            "fn_1615": frame["fn_1615"],
+            "lq2": lq2,
+            "y_tms": np.log(frame["an_d6"]) - lq2,
+            "ln_s_lag": ln_s.shift(1),
+            "ln_p_lag": ln_p.shift(1),
+            "dlq_lag": lq2 - lq3,
+            "dln_s": ln_s - ln_s.shift(1),
+            "dln_p": ln_p - ln_p.shift(1),
+        }
+    )
+    out = pd.concat([out, months, (months - months.shift(1)).add_prefix("d_")], axis=1)
+    out["tms_sample"] = frame["pr_both"].astype(bool)
+    out["pe_nonpositive"] = frame["pe_peak"] <= 0
+    return out
+
+
+def tms_columns(frame: pd.DataFrame, *, with_prices: bool) -> list[str]:
+    """Regressors of B-TMS-PIT (or its no-price variant), without the constant."""
+    months = [c for c in frame.columns if re.fullmatch(r"(d_)?m\d\d", str(c))]
+    core = ["lq2", "dlq_lag"]
+    prices = list(TMS_PRICE_TERMS) if with_prices else []
+    return [*core, *prices, *months]
+
+
+def walk_forward_tms(frame: pd.DataFrame, *, with_prices: bool) -> pd.Series:
+    """Monthly expanding walk-forward forecast of A^N in levels (row 60, 5b).
+
+    A training row is admitted only if its D+6 actual was first published
+    before the fold's first D-1 16:30 issue. Forecast = exp(fitted log level).
+    """
+    design = _with_const(frame[tms_columns(frame, with_prices=with_prices)])
+    usable = frame["tms_sample"] & design.notna().all(axis=1)
+    forecast = pd.Series(np.nan, index=frame.index)
+    for fold_start in pd.date_range(TMS_SCORE_START, frame["gas_day"].max(), freq="MS"):
+        fold_end = fold_start + pd.DateOffset(months=1)
+        in_fold = (frame["gas_day"] >= fold_start) & (frame["gas_day"] < fold_end)
+        test = frame.index[usable & in_fold]
+        if len(test) == 0:
+            continue
+        first_issue = frame.loc[test, "issued_tms"].min()
+        train = frame.index[
+            usable
+            & (frame["gas_day"] < fold_start)
+            & (frame["an_d6_published"] < first_issue)
+            & frame["y_tms"].notna()
+        ]
+        coef, *_ = np.linalg.lstsq(
+            design.loc[train].to_numpy(dtype=float),
+            frame.loc[train, "y_tms"].to_numpy(dtype=float),
+            rcond=None,
+        )
+        fitted = design.loc[test].to_numpy(dtype=float) @ coef
+        forecast.loc[test] = np.exp(fitted + frame.loc[test, "lq2"].to_numpy())
+    return forecast
+
+
+def tms_in_sample(frame: pd.DataFrame) -> dict[str, float]:
+    """Re-estimate B-TMS-PIT on DEV-P, HAC 7 (row 60, 5a). Not a family test."""
+    rows = frame.loc[frame["tms_sample"]]
+    design = _with_const(rows[tms_columns(rows, with_prices=True)])
+    data = pd.concat([rows["y_tms"], design], axis=1).dropna()
+    x = data.drop(columns="y_tms")
+    x = x.loc[:, (x != 0).any()]  # month-change dummies never switched on
+    fit = sm.OLS(data["y_tms"], x).fit(cov_type="HAC", cov_kwds={"maxlags": HAC_LAGS})
+    wald = fit.wald_test(
+        ", ".join(f"{term} = 0" for term in TMS_PRICE_TERMS), scalar=True
+    )
+    cov = fit.cov_params()
+    rho = float(fit.params["lq2"])
+    out: dict[str, float] = {
+        "n": float(fit.nobs),
+        "r_squared": float(fit.rsquared),
+        "rho": rho,
+        "rho_se": float(fit.bse["lq2"]),
+        "wald_price_terms_stat": float(wald.statistic),
+        "wald_price_terms_p": float(wald.pvalue),
+    }
+    for term in TMS_PRICE_TERMS:
+        out[f"{term}"] = float(fit.params[term])
+        out[f"{term}_se"] = float(fit.bse[term])
+        out[f"{term}_p"] = float(fit.pvalues[term])
+    for term in ("ln_s_lag", "ln_p_lag"):
+        theta = float(fit.params[term])
+        grad = np.zeros(len(fit.params))
+        names = list(fit.params.index)
+        grad[names.index(term)] = -1.0 / rho
+        grad[names.index("lq2")] = theta / rho**2
+        out[f"long_run_{term}"] = -theta / rho
+        out[f"long_run_{term}_se"] = float(np.sqrt(grad @ cov.to_numpy() @ grad))
+    return out
+
+
+def diebold_mariano(errors_a: pd.Series, errors_b: pd.Series) -> dict[str, float]:
+    """DM test on squared-error loss, HAC 7: d = e_a^2 - e_b^2 (negative = a better)."""
+    loss = (errors_a**2 - errors_b**2).rename("d")
+    fit = hac_ols(loss, pd.DataFrame({"const": 1.0}, index=loss.index))
+    return {
+        "mean_loss_diff": fit.params["const"],
+        "se_hac": fit.se["const"],
+        "p_value": fit.p_values["const"],
+        "n": float(fit.n),
+    }
+
+
+def run_h4_baseline(panel: pd.DataFrame) -> dict[str, object]:
+    """B-TMS-PIT: in-sample re-estimation and walk-forward comparison (row 60)."""
+    frame = tms_frame(panel)
+    frame["tms"] = walk_forward_tms(frame, with_prices=True)
+    frame["tms_noprice"] = walk_forward_tms(frame, with_prices=False)
+    scored = frame.loc[frame["tms_sample"] & (frame["gas_day"] >= TMS_SCORE_START)]
+    forecasts = {
+        "B-TMS-PIT (16:30)": "tms",
+        "B-TMS-PIT-noprice (16:30)": "tms_noprice",
+        "raw NTS D-1 13:10": "fn_1310",
+        "raw NTS D-1 16:15": "fn_1615",
+    }
+    scores = score(scored, forecasts, "an_d6")
+    common = scored.dropna(subset=["an_d6", *forecasts.values()])
+    error = {k: common[k] - common["an_d6"] for k in forecasts.values()}
+    dm = {
+        "tms_vs_nts_1310": diebold_mariano(error["tms"], error["fn_1310"]),
+        "tms_vs_nts_1615": diebold_mariano(error["tms"], error["fn_1615"]),
+        "tms_vs_noprice": diebold_mariano(error["tms"], error["tms_noprice"]),
+    }
+    sample = frame.loc[frame["tms_sample"]]
+    counts = {
+        "h4_sample_days": float(len(sample)),
+        "dropped_pe_nonpositive": float(
+            (sample["pe_nonpositive"] | sample["pe_nonpositive"].shift(1)).sum()
+        ),
+        "dropped_lq2_not_public": float(sample["lq2"].isna().sum()),
+        "in_sample_complete": float(
+            len(sample.dropna(subset=["y_tms", *tms_columns(sample, with_prices=True)]))
+        ),
+    }
+    return {
+        "in_sample": tms_in_sample(frame),
+        "scores": scores,
+        "diebold_mariano": dm,
+        "counts": counts,
+    }
+
+
+def h4_rows(panel: pd.DataFrame) -> pd.DataFrame:
+    """H4 estimation rows: D and D-1 pass the product rule; e^N = F - A."""
+    rows = panel.loc[panel["pr_both"]].assign(e_n=lambda f: f["fn_1310"] - f["an_d6"])
+    return rows.dropna(subset=["e_n", "dp_da", *H4_CONTROLS])
+
+
+def run_h4_mde(panel: pd.DataFrame, *, n_sims: int = 500) -> MdeResult:
+    """MDE for H4 per 1 p/kWh of dP^DA (pre-registration §6), before estimation."""
+    rows = h4_rows(panel)
+    return simulate_mde_ols(
+        rows["e_n"],
+        _with_const(rows[H4_CONTROLS]),
+        rows["dp_da"],
+        rows["gas_day"],
+        alphas=SECONDARY_ALPHAS,
+        n_sims=n_sims,
+    )
+
+
+def run_h4(
+    panel: pd.DataFrame, other_secondary: dict[str, float]
+) -> tuple[pd.DataFrame, dict[str, bool]]:
+    """Estimate H4 once and settle Holm over the six secondary tests."""
+    rows = h4_rows(panel)
+    fit = hac_ols(rows["e_n"], _with_const(rows[["dp_da", *H4_CONTROLS]]))
+    table = pd.DataFrame(
+        [
+            _coef_row(
+                "H4", fit.params, fit.se, fit.p_values, term, fit.n, fit.n_effective
+            )
+            for term in ("dp_da", *H4_CONTROLS)
+        ]
+    )
+    family = {**other_secondary, "H4": fit.p_values["dp_da"]}
+    if len(family) != SECONDARY_SIZE:
+        msg = f"secondary family has {len(family)} tests, expected {SECONDARY_SIZE}"
+        raise ValueError(msg)
+    return table, holm(family)

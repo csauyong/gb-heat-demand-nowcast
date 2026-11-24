@@ -277,3 +277,75 @@ def probe_history_coverage(
     report = coverage_from_frame(ric, frame)
     del frame
     return report
+
+
+#: GB day-ahead power peakload for the H4 baseline's spark ratio (row 60).
+GB_POWER_PEAK_RIC: Final[str] = "EPXGBAUCD1PK"
+GB_POWER_PEAK_FIELD: Final[str] = "TRDPRC_1"
+
+
+def load_gb_power_day_ahead_peak(
+    start: dt.date,
+    end: dt.date,
+    *,
+    vintage: str = "2026-11-24",
+    refresh: bool = False,
+) -> pd.DataFrame:
+    """Load the EPEX GB Day-Ahead 60-min auction peakload price by row date.
+
+    Source: LSEG Workspace, ``lseg.data.get_history("EPXGBAUCD1PK")``, field
+        ``TRDPRC_1`` (display name "DA AUCTION PEAK", GBP); index published
+        by EPEX SPOT, GB Day-Ahead 60-minute auction, peakload.
+        https://www.epexspot.com (GB Day-Ahead auction).
+    Licence: the owner's institutional LSEG licence; derived results only,
+        raw values are not redistributed (``data/`` is gitignored).
+    Vintage: pulled {vintage}. Auction results are not restated.
+    Publication lag: the GB 60-min day-ahead auction closes at **09:20
+        London on D-1** and results follow within the hour, so the price for
+        delivery day D is knowable from about 10:00 London on D-1, before
+        the 16:15-16:30 NBP window. Whether a row is dated by auction day or
+        by delivery day is not documented by LSEG; it is decided by the
+        weekday rule of decision log row 60 (:func:`heat_nowcast.features.
+        paper1.classify_row_dating`), not assumed here.
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``row_date`` (naive), ``price_gbp_mwh``.
+    """
+
+    def fetch() -> tuple[pd.DataFrame, list[str]]:
+        history = _get_history(GB_POWER_PEAK_RIC, start, end)
+        if GB_POWER_PEAK_FIELD not in history.columns:
+            msg = f"{GB_POWER_PEAK_FIELD} missing; got {list(history.columns)}"
+            raise RuntimeError(msg)
+        frame = pd.DataFrame(
+            {
+                "row_date": pd.DatetimeIndex(history.index)
+                .tz_localize(None)
+                .normalize(),
+                "price_gbp_mwh": pd.to_numeric(
+                    history[GB_POWER_PEAK_FIELD], errors="coerce"
+                ).to_numpy(),
+            }
+        )
+        return frame, [f"lseg:{GB_POWER_PEAK_RIC}/{GB_POWER_PEAK_FIELD}"]
+
+    raw = cached_pull(
+        dataset=f"lseg_{GB_POWER_PEAK_RIC}_{start.isoformat()}_{end.isoformat()}",
+        vintage=vintage,
+        licence="LSEG institutional licence; not redistributed",
+        publication_lag="Delivery day D price knowable from ~10:00 London on D-1.",
+        fetch=fetch,
+        params={
+            "ric": GB_POWER_PEAK_RIC,
+            "field": GB_POWER_PEAK_FIELD,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        },
+        notes="EPEX GB DA 60-min auction peakload, GBP/MWh, by LSEG row date.",
+        refresh=refresh,
+    )
+    out = raw.dropna(subset=["price_gbp_mwh"]).copy()
+    out["row_date"] = pd.to_datetime(out["row_date"])
+    return out.sort_values("row_date").reset_index(drop=True)
